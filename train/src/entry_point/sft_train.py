@@ -29,7 +29,7 @@ from src.sample_generator import (
     batch_grouped_sft_generate,
     generate_and_tokenize_prompt,
 )
-from src.models.llama.modeling_llama import LlamaForCausalLM
+# from src.models.llama.modeling_llama import LlamaForCausalLM
 
 if version.parse(transformers.__version__) <= version.parse("4.30.2"):
     from src.trainer import MyTrainer as Trainer
@@ -38,6 +38,20 @@ else:
 
 logger = logging.getLogger(__name__)
 
+def find_all_linear_names(model):
+    """
+    找出所有全连接层，为所有全连接添加adapter
+    """
+    cls = bnb.nn.Linear4bit
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if isinstance(module, cls):
+            names = name.split('.')
+            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+
+    if 'lm_head' in lora_module_names:  # needed for 16-bit
+        lora_module_names.remove('lm_head')
+    return list(lora_module_names)
 
 @dataclass
 class ModelArguments:
@@ -229,6 +243,7 @@ def main():
             load_in_8bit=True,  # xxx: int8 load in
             device_map=device_map,  # xxx: int8 requires passing device_map
             torch_dtype=torch_dtype,
+            trust_remote_code=True,
         )
     else:
         if model_args.llama:
@@ -241,6 +256,7 @@ def main():
             model = AutoModelForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 torch_dtype=torch_dtype,
+                trust_remote_code=True,
             )
 
     if model_args.llama:
@@ -252,10 +268,13 @@ def main():
         )
         tokenizer.eos_token_id = 2
         tokenizer.bos_token_id = 1
+        tokenizer.pad_token_id = 0
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-
-    tokenizer.pad_token_id = 0
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,trust_remote_code=True)
+        tokenizer.pad_token_id = tokenizer.eod_id
+        tokenizer.bos_token_id = tokenizer.eod_id
+        tokenizer.eos_token_id = tokenizer.eod_id
+    
     tokenizer.padding_side = "left"  # Allow batched inference
 
     print_rank_0(
@@ -290,10 +309,11 @@ def main():
                 global_rank,
             )
             model = prepare_model_for_int8_training(model)
+        target_modules = find_all_linear_names(model)
         config = LoraConfig(
             r=lora_config["lora_r"],
             lora_alpha=lora_config["lora_alpha"],
-            target_modules=lora_config["lora_target_modules"],
+            target_modules=target_modules,
             lora_dropout=lora_config["lora_dropout"],
             bias="none",
             task_type="CAUSAL_LM",
