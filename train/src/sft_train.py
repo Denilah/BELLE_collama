@@ -24,34 +24,20 @@ import logging
 import json
 import sys
 
-from src.utils import get_model_param_count
-from src.sample_generator import (
+from utils import get_model_param_count
+from sample_generator import (
     batch_grouped_sft_generate,
     generate_and_tokenize_prompt,
 )
-# from src.models.llama.modeling_llama import LlamaForCausalLM
+# from models.llama.modeling_llama import LlamaForCausalLM
 
 if version.parse(transformers.__version__) <= version.parse("4.30.2"):
-    from src.trainer import MyTrainer as Trainer
+    from trainer import MyTrainer as Trainer
 else:
     from transformers import Trainer
 
 logger = logging.getLogger(__name__)
 
-def find_all_linear_names(model):
-    """
-    找出所有全连接层，为所有全连接添加adapter
-    """
-    cls = bnb.nn.Linear4bit
-    lora_module_names = set()
-    for name, module in model.named_modules():
-        if isinstance(module, cls):
-            names = name.split('.')
-            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
-
-    if 'lm_head' in lora_module_names:  # needed for 16-bit
-        lora_module_names.remove('lm_head')
-    return list(lora_module_names)
 
 @dataclass
 class ModelArguments:
@@ -270,11 +256,11 @@ def main():
         tokenizer.bos_token_id = 1
         tokenizer.pad_token_id = 0
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
         tokenizer.pad_token_id = tokenizer.eod_id
         tokenizer.bos_token_id = tokenizer.eod_id
         tokenizer.eos_token_id = tokenizer.eod_id
-    
+
     tokenizer.padding_side = "left"  # Allow batched inference
 
     print_rank_0(
@@ -292,7 +278,7 @@ def main():
         log_file,
         global_rank,
     )
-
+    
     # peft model
     if training_args.use_lora:
         print_rank_0(
@@ -309,11 +295,11 @@ def main():
                 global_rank,
             )
             model = prepare_model_for_int8_training(model)
-        target_modules = find_all_linear_names(model)
+        
         config = LoraConfig(
             r=lora_config["lora_r"],
             lora_alpha=lora_config["lora_alpha"],
-            target_modules=target_modules,
+            target_modules=lora_config["lora_target_modules"],
             lora_dropout=lora_config["lora_dropout"],
             bias="none",
             task_type="CAUSAL_LM",
@@ -422,7 +408,7 @@ def main():
         * training_args.gradient_accumulation_steps
     )
     # train steps
-    t_total = math.ceil(training_nums / batch_size) * training_args.num_train_epochs
+    t_total = math.floor(training_nums / batch_size) * training_args.num_train_epochs
     # eval steps
     training_args.eval_steps = max(t_total // 5, 5)
     # save steps
